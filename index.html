@@ -77,6 +77,13 @@ let trackLine = null;
 // ================= 地図 =================
 const map = L.map('map').setView([24.78, 125.33], 11);
 
+// ===== 重ね順（数字が大きいほど上） =====
+map.createPane('routePane');   map.getPane('routePane').style.zIndex = 400;  // 路線（未踏査）
+map.createPane('walkedPane');  map.getPane('walkedPane').style.zIndex = 450;  // 踏査済みライン
+map.createPane('labelPane');   map.getPane('labelPane').style.zIndex = 500;   // 番号ラベル
+map.createPane('trackPane');   map.getPane('trackPane').style.zIndex = 550;   // 踏査軌跡
+map.createPane('currentPane'); map.getPane('currentPane').style.zIndex = 600; // 現在地
+
 const baseLayers = {
   '淡色地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',
               {attribution:'地理院タイル', maxZoom:18}),
@@ -167,6 +174,7 @@ async function loadAll(){
           file: fname,
           line: o.line,
           layer: null,
+          walkedLayer: null,
           label: null,
           walked: false,
           color: '#999'
@@ -256,6 +264,7 @@ function assignColors(){
 function makeLabel(lat, lng, num, color, isEnd){
   const size = isEnd ? 30 : 22;
   return L.marker([lat,lng],{
+    pane:'labelPane',
     icon:L.divIcon({className:'',
       html:`<div class="routeLabel ${isEnd?'endLabel':'midLabel'}" style="border-color:${color}">${esc(num)}</div>`,
       iconSize:[size,size]}),
@@ -268,6 +277,7 @@ function makeLabel(lat, lng, num, color, isEnd){
 function buildMap(){
   segments.forEach(s=>{
     if(s.layer) map.removeLayer(s.layer);
+    if(s.walkedLayer) map.removeLayer(s.walkedLayer);
     if(s.label) map.removeLayer(s.label);
   });
 
@@ -277,7 +287,16 @@ function buildMap(){
 
   segments.forEach((s,i)=>{
     const latlngs = s.line.geometry.coordinates.map(c=>[c[1],c[0]]);
-    s.layer = L.polyline(latlngs,{color:s.color,weight:LINE_WEIGHT,opacity:LINE_OPACITY}).addTo(map);
+
+    // 未踏査の線（下の層）
+    s.layer = L.polyline(latlngs,{
+      pane:'routePane', color:s.color, weight:LINE_WEIGHT, opacity:LINE_OPACITY
+    }).addTo(map);
+
+    // 踏査済みの線（上の層・最初は非表示）
+    s.walkedLayer = L.polyline(latlngs,{
+      pane:'walkedPane', color:s.color, weight:LINE_WEIGHT+2, opacity:0
+    }).addTo(map);
 
     const num = (s.route.match(/(\d+)/)||[,''])[1] || s.route.slice(0,2);
     const len = turf.length(s.line,{units:'meters'});
@@ -323,8 +342,9 @@ document.getElementById('btnStart').addEventListener('click',()=>{
   trackPoints = [];
   segments.forEach(s=>{
     s.walked = false;
-    s.layer.setStyle({color:s.color, weight:LINE_WEIGHT, opacity:LINE_OPACITY});
+    s.walkedLayer.setStyle({opacity:0});
   });
+  if(trackLine){ map.removeLayer(trackLine); trackLine = null; }
   document.getElementById('btnStart').disabled = true;
   document.getElementById('btnEnd').disabled = false;
 
@@ -342,23 +362,26 @@ function onPosition(pos){
 
   trackPoints.push({lat, lng, time:new Date(pos.timestamp), accuracy});
 
+  // 現在地マーク（最上層）
   if(!currentMarker){
     currentMarker = L.circleMarker([lat,lng],
-      {radius:8, color:'#fff', weight:2, fillColor:'#d62a2a', fillOpacity:1}).addTo(map);
+      {pane:'currentPane', radius:8, color:'#fff', weight:2, fillColor:'#d62a2a', fillOpacity:1}).addTo(map);
   }else currentMarker.setLatLng([lat,lng]);
   map.panTo([lat,lng]);
 
+  // 踏査軌跡
   const pts = trackPoints.map(p=>[p.lat,p.lng]);
-  if(!trackLine) trackLine = L.polyline(pts,{color:'#d62a2a',weight:3,dashArray:'4 6'}).addTo(map);
+  if(!trackLine) trackLine = L.polyline(pts,{pane:'trackPane',color:'#d62a2a',weight:3,dashArray:'4 6'}).addTo(map);
   else trackLine.setLatLngs(pts);
 
+  // 踏査済み判定
   const pt = turf.point([lng,lat]);
   segments.forEach(s=>{
     if(s.walked) return;
     const nearest = turf.nearestPointOnLine(s.line, pt, {units:'meters'});
     if(nearest.properties.dist <= THRESHOLD_M){
       s.walked = true;
-      s.layer.setStyle({color:s.color, weight:LINE_WEIGHT+2, opacity:1});
+      s.walkedLayer.setStyle({opacity:1});
     }
   });
   updateInfo();
