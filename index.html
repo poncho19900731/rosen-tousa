@@ -81,8 +81,8 @@ const map = L.map('map').setView([24.78, 125.33], 11);
 map.createPane('routePane');   map.getPane('routePane').style.zIndex = 400;  // 路線（未踏査）
 map.createPane('walkedPane');  map.getPane('walkedPane').style.zIndex = 450;  // 踏査済みライン
 map.createPane('labelPane');   map.getPane('labelPane').style.zIndex = 500;   // 番号ラベル
-map.createPane('trackPane');   map.getPane('trackPane').style.zIndex = 550;   // 踏査軌跡
-map.createPane('currentPane'); map.getPane('currentPane').style.zIndex = 600; // 現在地
+map.createPane('trackPane');   map.getPane('trackPane').style.zIndex = 900;   // 通過した軌跡（最上層）
+map.createPane('currentPane'); map.getPane('currentPane').style.zIndex = 950; // 現在地（最上層）
 
 const baseLayers = {
   '淡色地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',
@@ -268,8 +268,7 @@ function makeLabel(lat, lng, num, color, isEnd){
     icon:L.divIcon({className:'',
       html:`<div class="routeLabel ${isEnd?'endLabel':'midLabel'}" style="border-color:${color}">${esc(num)}</div>`,
       iconSize:[size,size]}),
-    interactive:false,
-    zIndexOffset: isEnd ? 1000 : 0
+    interactive:false
   });
 }
 
@@ -369,9 +368,9 @@ function onPosition(pos){
   }else currentMarker.setLatLng([lat,lng]);
   map.panTo([lat,lng]);
 
-  // 踏査軌跡
+  // 通過した軌跡（最上層）
   const pts = trackPoints.map(p=>[p.lat,p.lng]);
-  if(!trackLine) trackLine = L.polyline(pts,{pane:'trackPane',color:'#d62a2a',weight:3,dashArray:'4 6'}).addTo(map);
+  if(!trackLine) trackLine = L.polyline(pts,{pane:'trackPane',color:'#d62a2a',weight:4,dashArray:'4 6'}).addTo(map);
   else trackLine.setLatLngs(pts);
 
   // 踏査済み判定
