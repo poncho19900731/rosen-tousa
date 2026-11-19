@@ -54,14 +54,19 @@ const COLORS = [
 ];
 
 // ---- GitHub保存の設定 ----
-const GH_OWNER  = 'poncho19900731';   // ← 自分のGitHubユーザー名
+const GH_OWNER  = 'poncho19900731';
 const GH_REPO   = 'rosen-tousa';
 const GH_BRANCH = 'main';
-const GH_FOLDER = 'results';          // 保存先フォルダ（自動で作られます）
-const GH_TOKEN  = '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';    // ← github_pat_... を貼る
+const GH_FOLDER = 'results';
+
+// トークンはコードに書かず、調査終了のたびに入力する
+function getToken(){
+  const t = prompt('GitHubのトークン（github_pat_...）を貼り付けてください。\nキャンセルすると、GitHubへの保存は行わず端末にだけ保存します。');
+  return t ? t.trim() : '';
+}
 
 // ================= 状態 =================
-let segments = [];     // 区間（線1本ごと）
+let segments = [];
 let surveying = false;
 let watchId = null;
 let trackPoints = [];
@@ -86,8 +91,11 @@ baseLayers['淡色地図'].addTo(map);
 L.control.layers(baseLayers, null, {position:'topright'}).addTo(map);
 
 // ================= 便利関数 =================
-function esc(s){ return String(s).replace(/[&<>"']/g,
-  c=>({'&':'&','<':'<','>':'>','"':'"',"'":'''}[c])); }
+function esc(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
 function pad(n){ return String(n).padStart(2,'0'); }
 function fmtDT(d){
   return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -95,10 +103,12 @@ function fmtDT(d){
 function fmtStamp(d){
   return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
+// 先頭の見えない文字（BOM）を取り除く
+function stripBom(s){ return s.replace(/^\uFEFF/, ''); }
 
 // ================= KMLの解析 =================
 function parseKmlText(text){
-  const xml = new DOMParser().parseFromString(text,'text/xml');
+  const xml = new DOMParser().parseFromString(stripBom(text),'text/xml');
   if(xml.querySelector('parsererror')) throw new Error('KMLの形式が不正です');
   const geojson = toGeoJSON.kml(xml);
   const lines = [];
@@ -114,7 +124,7 @@ function parseKmlText(text){
   return lines;
 }
 
-// 「（way ○○）」と末尾の「_1」を除いた路線名（同じ路線かどうかの判定に使う）
+// 「（way ○○）」と末尾の「_1」を除いた路線名
 function baseName(name){
   return name.replace(/（way\s*\d+）/g,'').replace(/\(way\s*\d+\)/g,'')
              .replace(/_\d+\s*$/,'').trim();
@@ -126,27 +136,34 @@ async function loadAll(){
   let names;
   try{
     const res = await fetch(LIST_FILE + '?t=' + Date.now());
-    if(!res.ok) throw new Error('list.json が見つかりません');
-    names = await res.json();
+    if(!res.ok) throw new Error('list.json が見つかりません（HTTP ' + res.status + '）');
+    const txt = await res.text();
+    names = JSON.parse(stripBom(txt));
   }catch(e){
     info.textContent = 'list.json の読み込みに失敗：' + e.message;
     return;
   }
-  if(!names.length){ info.textContent='list.json にKMLが登録されていません'; return; }
+  if(!Array.isArray(names) || !names.length){
+    info.textContent = 'list.json にKMLが登録されていません';
+    return;
+  }
 
   const list = [];
   const errors = [];
+  let count = 0;
   for(const fname of names){
+    count++;
+    info.textContent = `読み込み中... ${count} / ${names.length}`;
     try{
       const res = await fetch(encodeURI(fname) + '?t=' + Date.now());
       if(!res.ok) throw new Error('HTTP ' + res.status);
-      const text = await res.text();
+      const text = stripBom(await res.text());
       const lines = parseKmlText(text);
       if(!lines.length) throw new Error('線が見つかりません');
       lines.forEach(o=>{
         list.push({
-          route: baseName(o.name),     // 路線名（同じ名前なら同じ路線）
-          part: o.name,                // 区間名
+          route: baseName(o.name),
+          part: o.name,
           file: fname,
           line: o.line,
           layer: null,
@@ -160,6 +177,7 @@ async function loadAll(){
     }
   }
   segments = list;
+  info.textContent = '地図を作成中...';
   buildMap();
   if(errors.length) alert('読み込めなかったKML\n' + errors.join('\n'));
 }
@@ -171,17 +189,15 @@ function endpoints(line){
 }
 
 function isAdjacent(a, b){
-  if(a.route === b.route) return false;   // 同じ路線どうしは対象外
+  if(a.route === b.route) return false;
   const ea = endpoints(a.line), eb = endpoints(b.line);
 
-  // ① 端点どうしが近い（つながっている）
   for(const pa of ea){
     for(const pb of eb){
       const d = turf.distance(turf.point(pa), turf.point(pb), {units:'meters'});
       if(d <= ADJACENT_M) return true;
     }
   }
-  // ② 一方の端点が、もう一方の線上にある（T字・交差）
   for(const pa of ea){
     const near = turf.nearestPointOnLine(b.line, turf.point(pa), {units:'meters'});
     if(near.properties.dist <= ADJACENT_M) return true;
@@ -193,16 +209,14 @@ function isAdjacent(a, b){
   return false;
 }
 
-// ================= 色の割り当て（同じ路線は同色、隣接する別路線は別色） =================
+// ================= 色の割り当て =================
 function assignColors(){
-  // ① 路線ごとに区間をまとめる
   const routeMap = {};
   segments.forEach((s,i)=>{
     (routeMap[s.route] = routeMap[s.route] || []).push(i);
   });
   const routeNames = Object.keys(routeMap);
 
-  // ② 路線どうしの隣接関係を作る
   const adj = {};
   routeNames.forEach(r=>adj[r] = new Set());
 
@@ -220,7 +234,6 @@ function assignColors(){
     }
   }
 
-  // ③ 隣接が多い路線から順に、お隣さんと違う色を割り当てる
   const order = routeNames.slice().sort((x,y)=>adj[y].size - adj[x].size);
   const colorOf = {};
   order.forEach(r=>{
@@ -233,7 +246,6 @@ function assignColors(){
     colorOf[r] = c;
   });
 
-  // ④ 区間に色を反映（同じ路線は同じ色になる）
   segments.forEach(s=>{
     s.colorIdx = colorOf[s.route];
     s.color = COLORS[s.colorIdx % COLORS.length];
@@ -261,8 +273,7 @@ function buildMap(){
 
   assignColors();
 
-  // 同じ路線の区間どうしがつながる点は、端点の丸を1個だけ置く
-  const placedEnds = {};   // 路線名 → 置いた端点の座標リスト
+  const placedEnds = {};
 
   segments.forEach((s,i)=>{
     const latlngs = s.line.geometry.coordinates.map(c=>[c[1],c[0]]);
@@ -273,7 +284,6 @@ function buildMap(){
     const group = L.layerGroup();
     placedEnds[s.route] = placedEnds[s.route] || [];
 
-    // 両端点
     const coords = s.line.geometry.coordinates;
     [coords[0], coords[coords.length-1]].forEach(p=>{
       const dup = placedEnds[s.route].some(q=>
@@ -283,7 +293,6 @@ function buildMap(){
       makeLabel(p[1], p[0], num, s.color, true).addTo(group);
     });
 
-    // 途中（一定間隔）
     for(let d = LABEL_INTERVAL_M; d < len - LABEL_INTERVAL_M/2; d += LABEL_INTERVAL_M){
       const p = turf.along(s.line, d, {units:'meters'}).geometry.coordinates;
       makeLabel(p[1], p[0], num, s.color, false).addTo(group);
@@ -343,7 +352,6 @@ function onPosition(pos){
   if(!trackLine) trackLine = L.polyline(pts,{color:'#d62a2a',weight:3,dashArray:'4 6'}).addTo(map);
   else trackLine.setLatLngs(pts);
 
-  // 路線との距離を判定して、踏査済みを濃く太くする
   const pt = turf.point([lng,lat]);
   segments.forEach(s=>{
     if(s.walked) return;
@@ -373,21 +381,26 @@ document.getElementById('btnEnd').addEventListener('click', async()=>{
   const kmlBlob  = new Blob([buildKml(startTime,endTime)],{type:'application/vnd.google-earth.kml+xml'});
   const xlsxBlob = buildXlsx(startTime, endTime, kmlName, xlsxName);
 
-  // ① GitHubへ自動保存
+  // ① GitHubへ保存（トークンを入力した場合のみ）
   const info = document.getElementById('info');
-  info.textContent = 'GitHubに保存中...';
+  const token = getToken();
   let ghMsg = '';
-  try{
-    await uploadToGitHub(kmlName,  kmlBlob);
-    await uploadToGitHub(xlsxName, xlsxBlob);
-    ghMsg = `GitHubに保存しました（${GH_FOLDER}フォルダ）`;
-  }catch(e){
-    ghMsg = 'GitHub保存に失敗：' + e.message;
+  if(token){
+    info.textContent = 'GitHubに保存中...';
+    try{
+      await uploadToGitHub(kmlName,  kmlBlob,  token);
+      await uploadToGitHub(xlsxName, xlsxBlob, token);
+      ghMsg = `GitHubに保存しました（${GH_FOLDER}フォルダ）`;
+    }catch(e){
+      ghMsg = 'GitHub保存に失敗：' + e.message;
+    }
+  }else{
+    ghMsg = 'トークン未入力のため、GitHubへの保存はしませんでした';
   }
   info.textContent = ghMsg;
   alert(ghMsg);
 
-  // ② 端末にも保存（共有画面またはダウンロード）
+  // ② 端末にも保存
   await saveFiles([
     new File([xlsxBlob], xlsxName, {type:xlsxBlob.type}),
     new File([kmlBlob],  kmlName,  {type:kmlBlob.type})
@@ -411,7 +424,6 @@ function buildXlsx(st, en, kmlName, xlsxName){
   const minutes = Math.round((en - st) / 60000);
   const files = [...new Set(segments.map(s=>s.file))];
 
-  // シート1：サマリー
   const summary = [
     ['項目','内容'],
     ['保存ファイル名（Excel）', xlsxName],
@@ -426,7 +438,6 @@ function buildXlsx(st, en, kmlName, xlsxName){
     ['使用したKML', files.join(' / ')]
   ];
 
-  // シート2：路線別結果
   const detail = [['路線名','区間名','元のKMLファイル','延長(m)','踏査結果']];
   segments.forEach(s=>{
     detail.push([
@@ -459,7 +470,7 @@ function blobToBase64(blob){
   });
 }
 
-async function uploadToGitHub(fileName, blob){
+async function uploadToGitHub(fileName, blob, token){
   const path = `${GH_FOLDER}/${fileName}`;
   const url = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/` +
               path.split('/').map(encodeURIComponent).join('/');
@@ -468,7 +479,7 @@ async function uploadToGitHub(fileName, blob){
   const res = await fetch(url, {
     method:'PUT',
     headers:{
-      'Authorization':'Bearer ' + GH_TOKEN,
+      'Authorization':'Bearer ' + token,
       'Accept':'application/vnd.github+json',
       'Content-Type':'application/json'
     },
@@ -499,7 +510,9 @@ async function saveFiles(files){
 }
 
 // ================= 起動 =================
-loadAll();
+loadAll().catch(e=>{
+  document.getElementById('info').textContent = '読み込みエラー：' + e.message;
+});
 </script>
 </body>
 </html>
