@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="路線踏査">
+<title>路線踏査アプリ</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+<script src="https://unpkg.com/@mapbox/togeojson@0.16.2/togeojson.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  html, body { margin:0; height:100%; font-family:sans-serif; }
+  body { display:flex; flex-direction:column; }
+
+  #header { flex:0 0 auto; padding:6px 8px; background:#f4f4f4; border-bottom:1px solid #ccc; }
+  #buttons { display:flex; flex-wrap:wrap; gap:4px; }
+  #buttons button { font-size:14px; padding:7px 10px; margin:0; white-space:nowrap; }
+  #btnStart { background:#2a9d4a; color:#fff; border:none; border-radius:4px; }
+  #btnEnd   { background:#d62a2a; color:#fff; border:none; border-radius:4px; }
+  #btnSave  { background:#3a6fd8; color:#fff; border:none; border-radius:4px; }
+  #btnList  { background:#6b4fbb; color:#fff; border:none; border-radius:4px; }
+  button:disabled { opacity:0.4; }
+
+  #info { font-size:13px; line-height:1.4; margin-top:5px; padding:3px 6px;
+          background:#fff; border:1px solid #ddd; border-radius:4px;
+          white-space:normal; word-break:break-all; }
+
+  #map { flex:1 1 auto; position:relative; min-height:0; }
+
+  .routeLabel { background:#fff; border:3px solid #333; border-radius:50%;
+                text-align:center; font-weight:bold; box-sizing:border-box; padding:0 3px; }
+  .endLabel { min-width:30px; height:30px; line-height:24px; font-size:13px;
+              border-width:4px; background:#ffffe0; }
+  .midLabel { min-width:22px; height:22px; line-height:16px; font-size:10px; }
+  .currentDot { width:22px; height:22px; border-radius:50%; background:#d62a2a;
+                border:4px solid #fff; box-sizing:border-box;
+                box-shadow:0 0 0 3px rgba(214,42,42,0.45), 0 0 8px rgba(0,0,0,0.5); }
+  #followBtn { position:fixed; right:10px; bottom:30px; z-index:1000;
+               padding:12px 16px; font-size:15px; border:none; border-radius:24px;
+               color:#fff; background:#888; box-shadow:0 2px 6px rgba(0,0,0,0.4); }
+  #followBtn.on { background:#2a7de1; }
+
+  #listPanel { position:fixed; left:0; right:0; bottom:0; height:45%;
+               z-index:1100; background:#fff; border-top:2px solid #6b4fbb;
+               display:none; flex-direction:column; }
+  #listBar { padding:6px 8px; background:#efeaff; font-size:13px;
+             display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  #listBar button { font-size:13px; padding:6px 10px; }
+  #listSummary { flex:1; min-width:120px; }
+  #listBody { overflow:auto; flex:1; }
+  #listBody table { border-collapse:collapse; width:100%; font-size:12px; }
+  #listBody th, #listBody td { border:1px solid #ccc; padding:3px 6px; white-space:nowrap; }
+  #listBody th { background:#f4f4f4; position:sticky; top:0; }
+  .outRoute { color:#c00; }
+
+  #legend { position:fixed; left:8px; bottom:30px; z-index:1000;
+            background:rgba(255,255,255,0.85); border:1px solid #bbb; border-radius:6px;
+            padding:4px 6px; font-size:11px; line-height:1.5; min-width:70px; }
+  #legend .lgTitle { font-weight:bold; margin-bottom:2px; cursor:pointer; }
+  #legend .lgRow { display:flex; align-items:center; gap:5px; }
+  #legend .lgLine { display:inline-block; width:22px; height:0; border-top-style:solid; }
+  #legend.min .lgRow { display:none; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div id="buttons">
+    <button id="btnStart" disabled>調査開始</button>
+    <button id="btnEnd" disabled>調査終了</button>
+    <button id="btnSave" disabled>記録をGitHubへ保存</button>
+    <button id="btnList">経路一覧</button>
+  </div>
+  <div id="info">読み込み中...</div>
+</div>
+<div id="map"></div>
+<button id="followBtn">現在地追従：OFF</button>
+<div id="legend"><div class="lgTitle" id="lgTitle">通過回数 ▼</div><div id="lgBody"></div></div>
+
+<div id="listPanel">
+  <div id="listBar">
+    <span id="listSummary"></span>
+    <button id="listXlsx">Excel保存</button>
+    <button id="listClear">記録をクリア</button>
+    <button id="listClose">閉じる</button>
+  </div>
+  <div id="listBody"></div>
+</div>
+
+<script>
+// =====================================================================
+// ■ 設定（変数はすべてここにまとめています）
+// =====================================================================
+
+// ---- GitHub保存の設定 ----
+const GH_OWNER  = 'poncho19900731';
+const GH_REPO   = 'rosen-tousa';
+const GH_BRANCH = 'main';
+const GH_FOLDER = 'results';
+const PROGRESS_FILE = 'progress.json';
+
+// ---- 読み込みファイル ----
+const LIST_FILE = 'list.json';
+
+// ---- 端末内の保存キー ----
+const LS_KEY    = 'rosen_progress_v1';
+const LS_TOKEN  = 'gh_token';
+
+// ---- 踏査判定 ----
+const THRESHOLD_M = 15;
+const MAX_ACCURACY_M = 25;
+const UNIT_M = 50;
+const GAP_FILL_UNITS = 3;
+const MIN_MOVE_M = 2;
+
+// ---- ラインの結合・色分け ----
+// ★ この距離以内なら「分断されていない」と判断して1本に統合する(m)
+//    これを超えて離れているものは、独立したラインとして残す
+const JOIN_M = 30;
+// ★ つなぐ端点どうしの進行方向の食い違いの許容角度(度)
+//    並走する別区間の端点が偶然近い場合に、誤ってつなぐのを防ぐ
+const JOIN_ANGLE_DEG = 100;
+const ADJACENT_M = 30;
+
+// ---- 番号ラベル ----
+const LABEL_DUP_M = 60;
+const LABEL_INTERVAL_M = 1000;   // ★ 号線番号の間隔の目安(m)。結合後ラインの両端の間を等間隔に割る
+
+// ---- 表示 ----
+const LINE_WEIGHT = 6;
+const LINE_OPACITY = 0.85;
+const COLORS = [
+  '#e6194b','#3cb44b','#4363d8','#f58231','#911eb4',
+  '#008b8b','#9a6324','#d2007a','#808000','#000075',
+  '#46a0f0','#f032e6','#7fb800','#800000','#555555'
+];
+
+// ---- 通過回数の線の色・太さ（1回, 2回, 3回, 4回以上）----
+const PASS_STYLES = [
+  {color:'#d62a2a', weight:5, label:'1回'},
+  {color:'#f58231', weight:6, label:'2回'},
+  {color:'#8e24aa', weight:7, label:'3回'},
+  {color:'#000000', weight:8, label:'4回以上'}
+];
+const PASS_NEAR_M = 12;
+const PASS_MIN_GAP = 8;
+// =====================================================================
+
+function getToken(){
+  let t = localStorage.getItem(LS_TOKEN) || '';
+  if(t) return t;
+  t = prompt('GitHubのトークン（github_pat_...）を貼り付けてください。\n（一度入力すると、この端末に記憶されます）');
+  t = t ? t.trim() : '';
+  if(t) localStorage.setItem(LS_TOKEN, t);
+  return t;
+}
+
+// ================= 状態 =================
+let segments = [];
+let surveying = false;
+let posWatchId = null;
+let trackPoints = [];
+let trackLines = [];
+let currentRun = null;
+let passLayers = [];
+let startTime = null;
+let currentMarker = null;
+let lastUnits = new Map();
+let followMe = false;
+let wakeLock = null;
+
+// ================= 地図 =================
+const map = L.map('map').setView([24.78, 125.33], 11);
+map.createPane('routePane');   map.getPane('routePane').style.zIndex = 400;
+map.createPane('walkedPane');  map.getPane('walkedPane').style.zIndex = 450;
+map.createPane('labelPane');   map.getPane('labelPane').style.zIndex = 500;
+map.createPane('trackPane');   map.getPane('trackPane').style.zIndex = 900;
+map.createPane('currentPane'); map.getPane('currentPane').style.zIndex = 950;
+
+const baseLayers = {
+  '淡色地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',
+              {attribution:'地理院タイル', maxZoom:18}),
+  '標準地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png',
+              {attribution:'地理院タイル', maxZoom:18}),
+  '航空写真': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+              {attribution:'地理院タイル', maxZoom:18}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              {attribution:'© OpenStreetMap contributors', maxZoom:19})
+};
+baseLayers['淡色地図'].addTo(map);
+L.control.layers(baseLayers, null, {position:'topright'}).addTo(map);
+
+if(window.ResizeObserver){
+  new ResizeObserver(()=> map.invalidateSize()).observe(document.getElementById('header'));
+}
+window.addEventListener('resize', ()=> map.invalidateSize());
+
+// ================= 便利関数 =================
+function esc(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function pad(n){ return String(n).padStart(2,'0'); }
+function fmtDT(d){
+  return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtDate(d){
+  return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())}`;
+}
+function fmtTime(d){
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function fmtStamp(d){
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+function stripBom(s){ return s.replace(/^\uFEFF/, ''); }
+function endpoints(line){
+  const c = line.geometry.coordinates;
+  return [c[0], c[c.length-1]];
+}
+function dist(a, b){
+  return turf.distance(turf.point(a), turf.point(b), {units:'meters'});
+}
+
+// ================= KMLの解析 =================
+function parseKmlText(text){
+  const xml = new DOMParser().parseFromString(stripBom(text),'text/xml');
+  if(xml.querySelector('parsererror')) throw new Error('KMLの形式が不正です');
+  const geojson = toGeoJSON.kml(xml);
+  const lines = [];
+  geojson.features.forEach((f,i)=>{
+    if(!f.geometry) return;
+    const name = f.properties.name || ('route_'+(i+1));
+    if(f.geometry.type==='LineString'){
+      lines.push({name, coords:f.geometry.coordinates});
+    }else if(f.geometry.type==='MultiLineString'){
+      f.geometry.coordinates.forEach(c=>lines.push({name, coords:c}));
+    }
+  });
+  return lines;
+}
+
+// 「（way ○○）」と末尾の「_1」を除いた路線名
+function baseName(name){
+  return name.replace(/（way\s*\d+）/g,'').replace(/\(way\s*\d+\)/g,'')
+             .replace(/_\d+\s*$/,'').trim();
+}
+
+// ================= 同じ路線の区間を1本につなぐ =================
+// 端点の進行方向（方位角, 度）。coordsの端から数点内側へ向かう向き
+function bearingAtEnd(coords, atEnd){
+  const n = coords.length;
+  let a, b;
+  if(atEnd){
+    b = coords[n-1];
+    a = coords[Math.max(0, n-4)];       // 終点から少し手前の点
+    if(a[0]===b[0] && a[1]===b[1]) a = coords[0];
+  }else{
+    b = coords[0];
+    a = coords[Math.min(n-1, 3)];       // 始点から少し先の点
+    if(a[0]===b[0] && a[1]===b[1]) a = coords[n-1];
+  }
+  // a→b の向き（外へ向かう向き）
+  return turf.bearing(turf.point(a), turf.point(b));
+}
+function angleDiff(a, b){
+  let d = Math.abs(a - b) % 360;
+  if(d > 180) d = 360 - d;
+  return d;
+}
+// 2つの端点をつなぐとき、向きが「外向き同士で反対」なら自然につながる。
+// 外向き方位の差が180度に近いほど、直線的につながる。
+function joinOk(bearingA, bearingB){
+  const diff = angleDiff(bearingA, bearingB);       // 0〜180
+  const turn = 180 - diff;                          // 折れ曲がり角（0なら直線）
+  return turn <= JOIN_ANGLE_DEG;
+}
+
+function joinParts(parts){
+  let pool = parts.map(p=>p.slice());
+  let result = pool.shift();
+  let progressed = true;
+  while(pool.length && progressed){
+    progressed = false;
+    let best = null;   // 最も近い端点どうしを優先
+    for(let i=0; i<pool.length; i++){
+      const p = pool[i];
+      const rs = result[0], re = result[result.length-1];
+      const ps = p[0], pe = p[p.length-1];
+      const bRS = bearingAtEnd(result, false), bRE = bearingAtEnd(result, true);
+      const bPS = bearingAtEnd(p, false),      bPE = bearingAtEnd(p, true);
+      const cands = [
+        {d:dist(re,ps), ok:joinOk(bRE,bPS), kind:'re-ps'},
+        {d:dist(re,pe), ok:joinOk(bRE,bPE), kind:'re-pe'},
+        {d:dist(rs,pe), ok:joinOk(bRS,bPE), kind:'rs-pe'},
+        {d:dist(rs,ps), ok:joinOk(bRS,bPS), kind:'rs-ps'}
+      ];
+      cands.forEach(c=>{
+        if(c.d <= JOIN_M && c.ok && (!best || c.d < best.d)){
+          best = {d:c.d, kind:c.kind, index:i};
+        }
+      });
+    }
+    if(best){
+      const p = pool[best.index];
+      let merged;
+      if(best.kind === 're-ps')      merged = result.concat(p.slice(1));
+      else if(best.kind === 're-pe') merged = result.concat(p.slice(0,-1).reverse());
+      else if(best.kind === 'rs-pe') merged = p.concat(result.slice(1));
+      else                           merged = p.slice().reverse().concat(result.slice(1));
+      result = merged;
+      pool.splice(best.index,1);
+      progressed = true;
+    }
+  }
+  // つながらなかった分は、残りの中でさらに結合を試みて独立ラインにする
+  if(pool.length){
+    return [result].concat(joinParts(pool));
+  }
+  return [result];
+}
+
+// ================= 起動時にKMLをすべて読み込む =================
+async function loadAll(){
+  const info = document.getElementById('info');
+  let names;
+  try{
+    const res = await fetch(LIST_FILE + '?t=' + Date.now());
+    if(!res.ok) throw new Error('list.json が見つかりません（HTTP ' + res.status + '）');
+    names = JSON.parse(stripBom(await res.text()));
+  }catch(e){
+    info.textContent = 'list.json の読み込みに失敗：' + e.message;
+    return;
+  }
+  if(!Array.isArray(names) || !names.length){
+    info.textContent = 'list.json にKMLが登録されていません';
+    return;
+  }
+
+  const byRoute = {};
+  const errors = [];
+  let count = 0;
+  for(const fname of names){
+    count++;
+    info.textContent = `読み込み中... ${count} / ${names.length}`;
+    try{
+      const res = await fetch(encodeURI(fname) + '?t=' + Date.now());
+      if(!res.ok) throw new Error('HTTP ' + res.status);
+      const lines = parseKmlText(stripBom(await res.text()));
+      if(!lines.length) throw new Error('線が見つかりません');
+      lines.forEach(o=>{
+        const r = baseName(o.name);
+        byRoute[r] = byRoute[r] || {parts:[], files:new Set()};
+        byRoute[r].parts.push(o.coords);
+        byRoute[r].files.add(fname);
+      });
+    }catch(e){
+      errors.push(fname + '：' + e.message);
+    }
+  }
+
+  const list = [];
+  Object.keys(byRoute).forEach(route=>{
+    const joined = joinParts(byRoute[route].parts);
+    joined.forEach((coords, k)=>{
+      const line = turf.lineString(coords);
+      const len = turf.length(line,{units:'meters'});
+      const unitCount = Math.max(1, Math.ceil(len / UNIT_M));
+      list.push({
+        route: route,
+        part: joined.length > 1 ? `${route}_${k+1}` : route,
+        file: [...byRoute[route].files].join(' / '),
+        line: line,
+        bbox: turf.bbox(line),
+        length: len,
+        unitCount: unitCount,
+        unitWalked: new Array(unitCount).fill(false),
+        unitDone: 0,
+        layer: null,
+        walkedLayers: [],
+        walked: false,
+        color: '#999'
+      });
+    });
+  });
+  segments = list;
+  info.textContent = '地図を作成中...';
+  buildMap();
+  restoreProgress();
+  await loadRemoteProgress();
+  if(errors.length) alert('読み込めなかったKML\n' + errors.join('\n'));
+}
+
+// ================= 隣接判定・色の割り当て =================
+function isAdjacent(a, b){
+  if(a.route === b.route) return false;
+  const ea = endpoints(a.line), eb = endpoints(b.line);
+  for(const pa of ea) for(const pb of eb){
+    if(dist(pa,pb) <= ADJACENT_M) return true;
+  }
+  for(const pa of ea){
+    const near = turf.nearestPointOnLine(b.line, turf.point(pa), {units:'meters'});
+    if(near.properties.dist <= ADJACENT_M) return true;
+  }
+  for(const pb of eb){
+    const near = turf.nearestPointOnLine(a.line, turf.point(pb), {units:'meters'});
+    if(near.properties.dist <= ADJACENT_M) return true;
+  }
+  return false;
+}
+
+function assignColors(){
+  const routeMap = {};
+  segments.forEach((s,i)=>{ (routeMap[s.route] = routeMap[s.route] || []).push(i); });
+  const routeNames = Object.keys(routeMap);
+  const adj = {};
+  routeNames.forEach(r=>adj[r] = new Set());
+  for(let a=0; a<routeNames.length; a++){
+    for(let b=a+1; b<routeNames.length; b++){
+      const ra = routeNames[a], rb = routeNames[b];
+      let touch = false;
+      for(const i of routeMap[ra]){
+        for(const j of routeMap[rb]){
+          if(isAdjacent(segments[i], segments[j])){ touch = true; break; }
+        }
+        if(touch) break;
+      }
+      if(touch){ adj[ra].add(rb); adj[rb].add(ra); }
+    }
+  }
+  const order = routeNames.slice().sort((x,y)=>adj[y].size - adj[x].size);
+  const colorOf = {};
+  order.forEach(r=>{
+    const used = new Set();
+    adj[r].forEach(n=>{ if(colorOf[n] !== undefined) used.add(colorOf[n]); });
+    let c = 0;
+    while(used.has(c)) c++;
+    colorOf[r] = c;
+  });
+  segments.forEach(s=>{
+    s.colorIdx = colorOf[s.route];
+    s.color = COLORS[s.colorIdx % COLORS.length];
+  });
+}
+
+// ================= 番号ラベル =================
+function makeLabel(lat, lng, num, color, isEnd){
+  const size = isEnd ? 30 : 22;
+  return L.marker([lat,lng],{
+    pane:'labelPane',
+    icon:L.divIcon({className:'',
+      html:`<div class="routeLabel ${isEnd?'endLabel':'midLabel'}" style="border-color:${color}">${esc(num)}</div>`,
+      iconSize:[size,size]}),
+    interactive:false
+  });
+}
+
+// 小区間の座標を取り出す
+function unitLatLngs(s, idx){
+  const from = idx * UNIT_M;
+  const to = Math.min((idx + 1) * UNIT_M, s.length);
+  if(to <= from) return [];
+  const part = turf.lineSliceAlong(s.line, from/1000, to/1000, {units:'kilometers'});
+  return part.geometry.coordinates.map(c=>[c[1],c[0]]);
+}
+
+// ================= 地図に描く =================
+function buildMap(){
+  segments.forEach(s=>{
+    if(s.layer) map.removeLayer(s.layer);
+    s.walkedLayers.forEach(l=>{ if(l) map.removeLayer(l); });
+    s.walkedLayers = [];
+  });
+  if(window._labelGroup){ map.removeLayer(window._labelGroup); window._labelGroup = null; }
+
+  assignColors();
+
+  // ★ 号線番号：結合後のラインごとに、両端＋等間隔で配置する
+  //   ライン長 ÷ 目安間隔 で区間数を決め、始点(0)から終点(len)まで完全に等間隔で割る
+  const labelItems = [];
+  segments.forEach(s=>{
+    const num = (s.route.match(/(\d+)/)||[,''])[1] || s.route.slice(0,2);
+    const len = s.length;
+    const eps = endpoints(s.line);
+    const isLoop = dist(eps[0], eps[1]) <= ADJACENT_M;   // 始点と終点が近い（周回など）
+
+    // 区間数（最低1＝両端のみ）
+    const divisions = Math.max(1, Math.round(len / LABEL_INTERVAL_M));
+    for(let k=0; k<=divisions; k++){
+      // 周回ラインは終点側の重複ラベルを出さない
+      if(isLoop && k === divisions) continue;
+      const d = len * k / divisions;
+      const p = (k === 0)
+        ? eps[0]
+        : (k === divisions)
+          ? eps[1]
+          : turf.along(s.line, d/1000, {units:'kilometers'}).geometry.coordinates;
+      labelItems.push({p, num, route:s.route, color:s.color, isEnd:(k===0 || k===divisions)});
+    }
+  });
+  // 同じ路線の番号どうしが近い場合だけ1つにまとめる（両端を優先）
+  const kept = [];
+  labelItems.sort((a,b)=> (b.isEnd?1:0) - (a.isEnd?1:0));
+  labelItems.forEach(it=>{
+    const dup = kept.some(k=> k.route === it.route && dist(k.p, it.p) <= LABEL_DUP_M);
+    if(!dup) kept.push(it);
+  });
+  const labelGroup = L.layerGroup();
+  kept.forEach(it=> makeLabel(it.p[1], it.p[0], it.num, it.color, it.isEnd).addTo(labelGroup));
+  window._labelGroup = labelGroup.addTo(map);
+
+  segments.forEach(s=>{
+    const latlngs = s.line.geometry.coordinates.map(c=>[c[1],c[0]]);
+    s.layer = L.polyline(latlngs,{
+      pane:'routePane', color:s.color, weight:LINE_WEIGHT, opacity:LINE_OPACITY
+    }).addTo(map);
+    s.walkedLayers = new Array(s.unitCount).fill(null);
+  });
+
+  if(segments.length){
+    map.fitBounds(L.featureGroup(segments.map(s=>s.layer)).getBounds());
+    document.getElementById('btnStart').disabled = false;
+    document.getElementById('btnSave').disabled = false;
+  }
+  updateInfo();
+}
+
+function updateInfo(){
+  const el = document.getElementById('info');
+  const routeCount = new Set(segments.map(s=>s.route)).size;
+  let done = 0, totalUnits = 0, doneUnits = 0;
+  segments.forEach(s=>{
+    if(s.walked) done++;
+    totalUnits += s.unitCount;
+    doneUnits += s.unitDone || 0;
+  });
+  el.textContent = `路線 ${routeCount} 本 / ライン ${segments.length} / 全線踏査済み ${done} / 踏査済み ${doneUnits}/${totalUnits} 小区間` + (surveying ? ' ［調査中］' : '');
+}
+
+// ================= 踏査記録の保存・復元 =================
+function collectProgress(){
+  const out = {};
+  segments.forEach(s=>{
+    const arr = [];
+    s.unitWalked.forEach((v,i)=>{ if(v) arr.push(i); });
+    if(arr.length) out[s.part] = {units:arr, count:s.unitCount};
+  });
+  return out;
+}
+function saveLocal(){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(collectProgress())); }catch(e){}
+}
+function applyProgress(data){
+  segments.forEach(s=>{
+    s.unitWalked = new Array(s.unitCount).fill(false);
+    s.unitDone = 0;
+    s.walked = false;
+    s.walkedLayers.forEach(l=>{ if(l) map.removeLayer(l); });
+    s.walkedLayers = new Array(s.unitCount).fill(null);
+  });
+  segments.forEach(s=>{
+    const rec = data && data[s.part];
+    if(!rec || rec.count !== s.unitCount) return;
+    rec.units.forEach(i=> markUnit(s, i, true));
+  });
+  updateInfo();
+}
+function restoreProgress(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(raw) applyProgress(JSON.parse(raw));
+  }catch(e){}
+}
+async function loadRemoteProgress(){
+  try{
+    const url = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/${GH_BRANCH}/${GH_FOLDER}/${PROGRESS_FILE}?t=${Date.now()}`;
+    const res = await fetch(url);
+    if(!res.ok) return;
+    applyProgress(JSON.parse(await res.text()));
+    saveLocal();
+  }catch(e){}
+}
+
+// ================= 小区間を踏査済みにする・戻す =================
+function markUnit(s, idx, silent){
+  if(idx < 0 || idx >= s.unitCount) return;
+  if(s.unitWalked[idx]) return;
+  s.unitWalked[idx] = true;
+  s.unitDone = (s.unitDone || 0) + 1;
+  const ll = unitLatLngs(s, idx);
+  if(ll.length >= 2){
+    const pl = L.polyline(ll,{
+      pane:'walkedPane', color:s.color, weight:LINE_WEIGHT+2, opacity:1
+    }).addTo(map);
+    pl.on('click', ()=> askDeleteUnit(s, idx));
+    s.walkedLayers[idx] = pl;
+  }
+  if(s.unitDone >= s.unitCount) s.walked = true;
+  if(!silent) saveLocal();
+}
+
+function unmarkUnit(s, idx){
+  if(!s.unitWalked[idx]) return;
+  s.unitWalked[idx] = false;
+  s.unitDone = Math.max(0, (s.unitDone||0) - 1);
+  s.walked = false;
+  if(s.walkedLayers[idx]){ map.removeLayer(s.walkedLayers[idx]); s.walkedLayers[idx] = null; }
+}
+
+function askDeleteUnit(s, idx){
+  if(!confirm('この踏査済みラインを削除しますか？\n（この周辺の連続した踏査済み部分をまとめて削除します）')) return;
+  let a = idx, b = idx;
+  while(a-1 >= 0 && s.unitWalked[a-1]) a--;
+  while(b+1 < s.unitCount && s.unitWalked[b+1]) b++;
+  for(let k=a; k<=b; k++) unmarkUnit(s, k);
+  saveLocal();
+  updateInfo();
+}
+
+// ================= 追従ボタン・画面ロック防止 =================
+function setFollow(on){
+  followMe = on;
+  const b = document.getElementById('followBtn');
+  b.textContent = '現在地追従：' + (on ? 'ON' : 'OFF');
+  b.classList.toggle('on', on);
+  if(on && currentMarker) map.panTo(currentMarker.getLatLng());
+}
+document.getElementById('followBtn').addEventListener('click', ()=> setFollow(!followMe));
+
+async function requestWakeLock(){
+  try{
+    if('wakeLock' in navigator){
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  }catch(e){}
+}
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible'){
+    if(surveying) requestWakeLock();
+    if(posWatchId === null) startPositionWatch();
+  }
+});
+
+// ================= 現在地の常時監視 =================
+function startPositionWatch(){
+  if(!navigator.geolocation || posWatchId !== null) return;
+  posWatchId = navigator.geolocation.watchPosition(onPosition, onGeoError,
+    {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+}
+function onGeoError(err){
+  document.getElementById('info').textContent = '位置情報エラー：' + err.message;
+}
+
+// ================= 調査（開始・終了） =================
+function startSurvey(){
+  if(!navigator.geolocation){ alert('この端末は位置情報に対応していません。'); return; }
+  surveying = true;
+  startTime = new Date();
+  lastUnits = new Map();
+  currentRun = {points:[]};
+  trackLines.push(currentRun);
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnEnd').disabled = false;
+  updateInfo();
+  requestWakeLock();
+  startPositionWatch();
+}
+document.getElementById('btnStart').addEventListener('click', startSurvey);
+
+function findAllNearby(pt){
+  const [x, y] = pt.geometry.coordinates;
+  const marginY = (THRESHOLD_M * 1.5) / 111000;
+  const marginX = marginY / Math.max(0.2, Math.cos(y * Math.PI / 180));
+  const hits = [];
+  segments.forEach(s=>{
+    const b = s.bbox;
+    if(x < b[0] - marginX || x > b[2] + marginX ||
+       y < b[1] - marginY || y > b[3] + marginY) return;
+    const np = turf.nearestPointOnLine(s.line, pt, {units:'meters'});
+    const d = np.properties.dist;
+    if(d > THRESHOLD_M) return;
+    hits.push({seg:s, dist:d, loc:np.properties.location});
+  });
+  return hits;
+}
+
+function onPosition(pos){
+  const {latitude:lat, longitude:lng, accuracy} = pos.coords;
+  if(accuracy > MAX_ACCURACY_M) return;
+
+  if(!currentMarker){
+    currentMarker = L.marker([lat,lng],{
+      pane:'currentPane',
+      icon:L.divIcon({className:'', html:'<div class="currentDot"></div>',
+        iconSize:[22,22], iconAnchor:[11,11]}),
+      interactive:false, zIndexOffset:10000
+    }).addTo(map);
+  }else{
+    currentMarker.setLatLng([lat,lng]);
+  }
+  if(followMe) map.panTo([lat,lng]);
+
+  if(!surveying || !currentRun) return;
+
+  const hits = findAllNearby(turf.point([lng,lat]));
+  const routeNames = [...new Set(hits.map(h=>h.seg.route))];
+  const routeText = routeNames.length ? routeNames.join(' / ') : '路線外';
+
+  const pts = currentRun.points;
+  const last = pts[pts.length-1];
+  const changed = !last || dist([last.lng, last.lat], [lng, lat]) >= MIN_MOVE_M;
+  if(changed){
+    const rec = {lat, lng, time:new Date(pos.timestamp), accuracy, route:routeText};
+    pts.push(rec);
+    trackPoints.push(rec);
+    renderPassLines();
+    renderList();
+  }
+
+  hits.forEach(h=>{
+    const s = h.seg;
+    const idx = Math.min(s.unitCount - 1, Math.floor(h.loc / UNIT_M));
+    judgeUnit(s, idx);
+  });
+  updateInfo();
+}
+
+function judgeUnit(s, idx){
+  const prev = lastUnits.get(s);
+  if(prev !== undefined){
+    const diff = idx - prev;
+    if(Math.abs(diff) <= 1){
+      markUnit(s, prev);
+      markUnit(s, idx);
+    }else if(Math.abs(diff) <= GAP_FILL_UNITS){
+      const from = Math.min(prev, idx);
+      const to = Math.max(prev, idx);
+      for(let k = from; k <= to; k++) markUnit(s, k);
+    }
+  }
+  lastUnits.set(s, idx);
+}
+
+function stopTracking(){
+  surveying = false;
+  if(wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock = null; }
+  lastUnits = new Map();
+  currentRun = null;
+}
+
+document.getElementById('btnEnd').addEventListener('click', async()=>{
+  if(!confirm('調査を終了してGitHubへ保存しますか？')) return;
+  const endTime = new Date();
+  const savedTrack = trackPoints.slice();
+  stopTracking();
+  saveLocal();
+
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnEnd').disabled = true;
+  updateInfo();
+
+  const stamp = fmtStamp(startTime);
+  const kmlName  = `踏査軌跡_${stamp}.kml`;
+  const xlsxName = `踏査結果_${stamp}.xlsx`;
+  const kmlBlob  = new Blob([buildKml(startTime,endTime)],{type:'application/vnd.google-earth.kml+xml'});
+  const xlsxBlob = buildXlsx(startTime, endTime, kmlName, xlsxName, savedTrack);
+
+  const info = document.getElementById('info');
+  const token = getToken();
+  if(!token){
+    info.textContent = 'トークン未入力のため、保存しませんでした';
+    alert('トークン未入力のため、保存しませんでした。');
+    return;
+  }
+  info.textContent = 'GitHubに保存中...';
+  try{
+    await uploadToGitHub(kmlName,  kmlBlob,  token);
+    await uploadToGitHub(xlsxName, xlsxBlob, token);
+    await uploadProgress(token);
+    info.textContent = `GitHubに保存しました（${GH_REPO} / ${GH_FOLDER}フォルダ）`;
+  }catch(e){
+    if(String(e.message).includes('401')) localStorage.removeItem(LS_TOKEN);
+    info.textContent = 'GitHub保存に失敗：' + e.message;
+    alert('GitHub保存に失敗：' + e.message);
+  }
+});
+
+document.getElementById('btnSave').addEventListener('click', async()=>{
+  const token = getToken();
+  if(!token){ alert('トークンが未入力です。'); return; }
+  try{
+    await uploadProgress(token);
+    alert('踏査記録をGitHubに保存しました。');
+  }catch(e){
+    if(String(e.message).includes('401')) localStorage.removeItem(LS_TOKEN);
+    alert('保存に失敗：' + e.message);
+  }
+});
+
+// ================= 通過回数の色分け =================
+function computePassCounts(){
+  const segs = [];
+  trackLines.forEach((r, ri)=>{
+    const pts = r.points;
+    for(let i=0; i<pts.length-1; i++){
+      const a = pts[i], b = pts[i+1];
+      segs.push({
+        run:ri, idx:i,
+        a:[a.lng,a.lat], b:[b.lng,b.lat],
+        mid:[(a.lng+b.lng)/2, (a.lat+b.lat)/2]
+      });
+    }
+  });
+
+  const dLat = PASS_NEAR_M * 1.5 / 111000;
+  const counts = new Array(segs.length).fill(1);
+  for(let s=0; s<segs.length; s++){
+    const me = segs[s];
+    const dLng = dLat / Math.max(0.2, Math.cos(me.mid[1] * Math.PI / 180));
+    const seenRuns = new Map();
+    for(let t=0; t<segs.length; t++){
+      if(t === s) continue;
+      const o = segs[t];
+      if(Math.abs(o.mid[1] - me.mid[1]) > dLat || Math.abs(o.mid[0] - me.mid[0]) > dLng) continue;
+      if(dist(me.mid, o.mid) > PASS_NEAR_M) continue;
+      if(!seenRuns.has(o.run)) seenRuns.set(o.run, []);
+      seenRuns.get(o.run).push(o.idx);
+    }
+    let groupCount = 1;
+    seenRuns.forEach((idxs, run)=>{
+      idxs.sort((x,y)=>x-y);
+      let groups = 0, prev = null;
+      idxs.forEach(v=>{
+        if(run === me.run && Math.abs(v - me.idx) <= PASS_MIN_GAP){ prev = v; return; }
+        if(prev === null || v - prev > PASS_MIN_GAP) groups++;
+        prev = v;
+      });
+      groupCount += groups;
+    });
+    counts[s] = groupCount;
+  }
+  return {segs, counts};
+}
+
+function renderPassLines(){
+  passLayers.forEach(l=> map.removeLayer(l));
+  passLayers = [];
+
+  const {segs, counts} = computePassCounts();
+  const stat = [0,0,0,0];
+
+  const flush = (arr, level)=>{
+    if(arr.length < 2 || level < 0) return;
+    const st = PASS_STYLES[level];
+    passLayers.push(L.polyline(arr,{
+      pane:'trackPane', color:st.color, weight:st.weight, opacity:0.9,
+      dashArray: level === 0 ? '6 6' : null
+    }).addTo(map));
+  };
+  let curLevel = -1, curRun = -1, buf = [];
+  segs.forEach((sg, k)=>{
+    const level = Math.min(PASS_STYLES.length, counts[k]) - 1;
+    stat[level] += dist(sg.a, sg.b);
+    const contiguous = buf.length &&
+      dist([buf[buf.length-1][1], buf[buf.length-1][0]], sg.a) <= 1;
+    if(level !== curLevel || sg.run !== curRun || !contiguous){
+      flush(buf, curLevel);
+      buf = [[sg.a[1], sg.a[0]]];
+      curLevel = level; curRun = sg.run;
+    }
+    buf.push([sg.b[1], sg.b[0]]);
+  });
+  flush(buf, curLevel);
+
+  passLayers.forEach(pl=>{
+    pl.on('click', e=>{
+      const here = [e.latlng.lng, e.latlng.lat];
+      let best = null, bd = Infinity;
+      segs.forEach((sg,k)=>{
+        const d = dist(sg.mid, here);
+        if(d < bd){ bd = d; best = k; }
+      });
+      if(best !== null){
+        L.popup().setLatLng(e.latlng)
+          .setContent(`この場所の通過回数：<b>${counts[best]}回</b>`).openOn(map);
+      }
+    });
+  });
+
+  renderLegend(stat);
+}
+
+// ================= 凡例 =================
+function renderLegend(stat){
+  const body = document.getElementById('lgBody');
+  stat = stat || [0,0,0,0];
+  body.innerHTML = PASS_STYLES.map((st,i)=>
+    `<div class="lgRow"><span class="lgLine" style="border-top-width:${st.weight}px;border-color:${st.color}"></span>` +
+    `<span>${st.label}${stat[i] ? '：' + Math.round(stat[i]) + 'm' : ''}</span></div>`
+  ).join('');
+}
+document.getElementById('lgTitle').addEventListener('click', ()=>{
+  const lg = document.getElementById('legend');
+  lg.classList.toggle('min');
+  document.getElementById('lgTitle').textContent = '通過回数 ' + (lg.classList.contains('min') ? '▶' : '▼');
+});
+renderLegend();
+
+// ================= 経路一覧パネル =================
+function renderList(){
+  const panel = document.getElementById('listPanel');
+  document.getElementById('listSummary').textContent =
+    `経路 ${trackPoints.length} 件 / 調査 ${trackLines.filter(r=>r.points.length).length} 回分`;
+  if(panel.style.display !== 'flex') return;
+  let html = '<table><thead><tr><th>#</th><th>日付</th><th>時刻</th><th>通過路線</th><th>緯度</th><th>経度</th></tr></thead><tbody>';
+  const start = Math.max(0, trackPoints.length - 500);
+  for(let i = trackPoints.length - 1; i >= start; i--){
+    const p = trackPoints[i];
+    const cls = p.route === '路線外' ? ' class="outRoute"' : '';
+    html += `<tr><td>${i+1}</td><td>${fmtDate(p.time)}</td><td>${fmtTime(p.time)}</td>` +
+            `<td${cls}>${esc(p.route)}</td><td>${p.lat.toFixed(6)}</td><td>${p.lng.toFixed(6)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('listBody').innerHTML = html;
+}
+document.getElementById('btnList').addEventListener('click', ()=>{
+  const panel = document.getElementById('listPanel');
+  panel.style.display = (panel.style.display === 'flex') ? 'none' : 'flex';
+  renderList();
+});
+document.getElementById('listClose').addEventListener('click', ()=>{
+  document.getElementById('listPanel').style.display = 'none';
+});
+
+document.getElementById('listXlsx').addEventListener('click', ()=>{
+  if(!trackPoints.length){ alert('記録がまだありません。'); return; }
+  const rows = [['日付','時刻','通過路線','緯度','経度']];
+  trackPoints.forEach(p=>{
+    rows.push([fmtDate(p.time), fmtTime(p.time), p.route || '路線外',
+               Number(p.lat.toFixed(7)), Number(p.lng.toFixed(7))]);
+  });
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:12},{wch:10},{wch:30},{wch:14},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws, '経路一覧');
+  XLSX.writeFile(wb, `経路一覧_${fmtStamp(new Date())}.xlsx`);
+});
+
+document.getElementById('listClear').addEventListener('click', ()=>{
+  if(!confirm('これまでの経路の記録をすべて消します。\n必要な場合は先にExcel保存してください。よろしいですか？')) return;
+  passLayers.forEach(l=> map.removeLayer(l));
+  passLayers = [];
+  trackLines = [];
+  trackPoints = [];
+  currentRun = surveying ? {points:[]} : null;
+  if(currentRun) trackLines.push(currentRun);
+  renderLegend();
+  renderList();
+});
+
+// ================= 出力 =================
+function buildKml(st, en){
+  const marks = trackLines.filter(r=>r.points.length > 1).map((r,i)=>{
+    const coords = r.points.map(p=>`${p.lng},${p.lat},0`).join(' ');
+    return `<Placemark><name>踏査軌跡_${i+1}</name>
+<Style><LineStyle><color>ff0000ff</color><width>3</width></LineStyle></Style>
+<LineString><tessellate>1</tessellate><coordinates>${coords}</coordinates></LineString>
+</Placemark>`;
+  }).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<name>踏査軌跡_${fmtStamp(st)}</name>
+<description>開始 ${fmtDT(st)} / 終了 ${fmtDT(en)}</description>
+${marks}
+</Document></kml>`;
+}
+
+function buildXlsx(st, en, kmlName, xlsxName, track){
+  const minutes = Math.round((en - st) / 60000);
+  const files = [...new Set(segments.map(s=>s.file))];
+
+  const routeStat = {};
+  segments.forEach(s=>{
+    const r = routeStat[s.route] = routeStat[s.route] || {total:0, walked:0, touched:0};
+    r.total++;
+    if(s.walked) r.walked++;
+    if((s.unitDone||0) > 0) r.touched++;
+  });
+  const fullRoutes = [], partRoutes = [];
+  Object.keys(routeStat).forEach(name=>{
+    const r = routeStat[name];
+    if(r.walked === r.total)  fullRoutes.push(name);
+    else if(r.touched > 0)    partRoutes.push(name);
+  });
+
+  const pc = computePassCounts();
+  const stat = [0,0,0,0];
+  pc.segs.forEach((sg,k)=>{ stat[Math.min(4, pc.counts[k]) - 1] += dist(sg.a, sg.b); });
+
+  const summary = [
+    ['項目','内容'],
+    ['保存ファイル名（Excel）', xlsxName],
+    ['保存ファイル名（軌跡KML）', kmlName],
+    ['調査開始', fmtDT(st)],
+    ['調査終了', fmtDT(en)],
+    ['所要時間（分）', minutes],
+    ['記録した点の数', track.length],
+    ['路線数', new Set(segments.map(s=>s.route)).size],
+    ['ライン数', segments.length],
+    ['全線を踏査済みの路線', fullRoutes.length ? fullRoutes.join(' / ') : 'なし'],
+    ['一部のみ踏査した路線', partRoutes.length ? partRoutes.join(' / ') : 'なし'],
+    ['通過1回の距離(m)', Math.round(stat[0])],
+    ['通過2回の距離(m)', Math.round(stat[1])],
+    ['通過3回の距離(m)', Math.round(stat[2])],
+    ['通過4回以上の距離(m)', Math.round(stat[3])],
+    ['使用したKML', files.join(' / ')]
+  ];
+
+  const detail = [['路線名','ライン名','元のKMLファイル','延長(m)','小区間数','踏査済み小区間','踏査率(%)','踏査結果']];
+  segments.forEach(s=>{
+    const doneU = s.unitDone || 0;
+    const rate = Math.round(doneU / s.unitCount * 100);
+    const result = s.walked ? '踏査済み' : (doneU > 0 ? '一部踏査' : '未踏査');
+    detail.push([s.route, s.part, s.file, Math.round(s.length), s.unitCount, doneU, rate, result]);
+  });
+
+  const trackRows = [['日付','時刻','通過路線','緯度','経度']];
+  track.forEach(p=>{
+    trackRows.push([fmtDate(p.time), fmtTime(p.time), p.route || '路線外',
+                    Number(p.lat.toFixed(7)), Number(p.lng.toFixed(7))]);
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws1 = XLSX.utils.aoa_to_sheet(summary);
+  const ws2 = XLSX.utils.aoa_to_sheet(detail);
+  const ws3 = XLSX.utils.aoa_to_sheet(trackRows);
+  ws1['!cols'] = [{wch:28},{wch:60}];
+  ws2['!cols'] = [{wch:24},{wch:34},{wch:28},{wch:10},{wch:10},{wch:14},{wch:10},{wch:10}];
+  ws3['!cols'] = [{wch:12},{wch:10},{wch:30},{wch:14},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws1, 'サマリー');
+  XLSX.utils.book_append_sheet(wb, ws2, '路線別結果');
+  XLSX.utils.book_append_sheet(wb, ws3, '経路一覧');
+  const out = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+  return new Blob([out],
+    {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+
+// ================= GitHubへアップロード =================
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const r = new FileReader();
+    r.onload  = ()=> resolve(r.result.split(',')[1]);
+    r.onerror = ()=> reject(new Error('ファイル変換に失敗'));
+    r.readAsDataURL(blob);
+  });
+}
+function textToBase64(text){
+  return btoa(unescape(encodeURIComponent(text)));
+}
+function apiUrl(path){
+  return `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/` +
+         path.split('/').map(encodeURIComponent).join('/');
+}
+
+async function uploadToGitHub(fileName, blob, token){
+  const path = `${GH_FOLDER}/${fileName}`;
+  const content = await blobToBase64(blob);
+  const res = await fetch(apiUrl(path), {
+    method:'PUT',
+    headers:{'Authorization':'Bearer ' + token,'Accept':'application/vnd.github+json','Content-Type':'application/json'},
+    body: JSON.stringify({message:`踏査結果を追加：${fileName}`, content, branch:GH_BRANCH})
+  });
+  if(!res.ok){
+    let detail = '';
+    try{ detail = (await res.json()).message; }catch(e){}
+    throw new Error(`${fileName}（HTTP ${res.status} ${detail}）`);
+  }
+}
+
+async function uploadProgress(token){
+  const path = `${GH_FOLDER}/${PROGRESS_FILE}`;
+  const headers = {'Authorization':'Bearer ' + token,'Accept':'application/vnd.github+json'};
+  let sha = null;
+  const cur = await fetch(apiUrl(path) + '?ref=' + GH_BRANCH + '&t=' + Date.now(), {headers});
+  if(cur.ok){ sha = (await cur.json()).sha; }
+  const body = {
+    message: '踏査記録を更新',
+    content: textToBase64(JSON.stringify(collectProgress())),
+    branch: GH_BRANCH
+  };
+  if(sha) body.sha = sha;
+  const res = await fetch(apiUrl(path), {
+    method:'PUT',
+    headers:{...headers,'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    let detail = '';
+    try{ detail = (await res.json()).message; }catch(e){}
+    throw new Error(`${PROGRESS_FILE}（HTTP ${res.status} ${detail}）`);
+  }
+}
+
+// ================= 起動 =================
+startPositionWatch();
+loadAll().catch(e=>{
+  document.getElementById('info').textContent = '読み込みエラー：' + e.message;
+});
+</script>
+</body>
+</html>
